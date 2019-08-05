@@ -10,6 +10,7 @@ use Platformsh\Client\Model\Backups\Policy;
 use Platformsh\Client\Model\Deployment\EnvironmentDeployment;
 use Platformsh\Client\Model\Deployment\Worker;
 use Platformsh\Client\Model\Git\Commit;
+use Platformsh\Client\Model\Type\Duration;
 
 /**
  * A Platform.sh environment.
@@ -628,9 +629,12 @@ class Environment extends ApiResourceBase
             'interval' => $policy->getInterval(),
             'count' => $policy->getCount(),
         ];
-        if (!isset($backups['manual_count'])) {
-            $backups['manual_count'] = 3;
-        }
+        $backups += ['manual_count' => 3];
+
+        // Sort the backup schedule, by interval.
+        usort($backups['schedule'], function (array $a, array $b) {
+            return (new Duration($a['interval']))->compare(new Duration($b['interval']));
+        });
 
         return $this->update(['backups' => $backups]);
     }
@@ -646,7 +650,7 @@ class Environment extends ApiResourceBase
      *
      * @return \Platformsh\Client\Model\Result
      */
-    public function runSourceOperation(string $name, array $variables = []): Result
+    public function runSourceOperation($name, array $variables = [])
     {
         return $this->runOperation('source-operation', 'post', [
             'operation' => $name,

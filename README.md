@@ -6,6 +6,8 @@ We recommend you use the [Platform.sh CLI](https://github.com/platformsh/platfor
 
 [![Build Status](https://travis-ci.org/platformsh/platformsh-client-php.svg?branch=master)](https://travis-ci.org/platformsh/platformsh-client-php)
 
+[![Build Status](https://travis-ci.org/platformsh/platformsh-client-php.svg?branch=1.x)](https://travis-ci.org/platformsh/platformsh-client-php)
+
 ## Install
 
 ```sh

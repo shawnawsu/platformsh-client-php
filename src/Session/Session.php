@@ -39,10 +39,20 @@ class Session implements SessionInterface
      */
     private function lazyLoad()
     {
+<<<<<<< HEAD
         if (!$this->loaded && isset($this->storage)) {
             $this->data = $this->storage->load($this->id);
             $this->original = $this->data;
             $this->loaded = true;
+=======
+        if (!$this->loaded || $reload) {
+            if (isset($this->storage)) {
+                $this->data = [];
+                $this->storage->load($this);
+                $this->original = $this->data;
+                $this->loaded = true;
+            }
+>>>>>>> 1.x
         }
     }
 

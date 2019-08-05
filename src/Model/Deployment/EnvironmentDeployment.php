@@ -2,7 +2,7 @@
 
 namespace Platformsh\Client\Model\Deployment;
 
-use Platformsh\Client\Model\ApiResourceBase;
+use Platformsh\Client\Model\Resource;
 
 /**
  * A Platform.sh environment deployment.
@@ -17,7 +17,7 @@ use Platformsh\Client\Model\ApiResourceBase;
  * @method WebApp getWebApp(string $name)
  * @method Worker getWorker(string $name)
  */
-class EnvironmentDeployment extends ApiResourceBase
+class EnvironmentDeployment extends Resource
 {
     private static $types = [
         'services' => Service::class,

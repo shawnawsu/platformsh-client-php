@@ -4,7 +4,7 @@ namespace Platformsh\Client\Model\Git;
 
 use GuzzleHttp\ClientInterface;
 use Platformsh\Client\Model\Project;
-use Platformsh\Client\Model\ApiResourceBase;
+use Platformsh\Client\Model\Resource;
 
 /**
  * Git blob resource.
@@ -14,7 +14,7 @@ use Platformsh\Client\Model\ApiResourceBase;
  * @property-read string $encoding
  * @property-read string $content
  */
-class Blob extends ApiResourceBase
+class Blob extends Resource
 {
     /**
      * Get the Blob object for an SHA hash.

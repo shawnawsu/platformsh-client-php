@@ -4,19 +4,14 @@ namespace Platformsh\Client\Connection;
 
 use GuzzleHttp\Client;
 use GuzzleHttp\ClientInterface;
+use GuzzleHttp\Collection;
 use GuzzleHttp\Exception\BadResponseException;
-use GuzzleHttp\HandlerStack;
-use function GuzzleHttp\Psr7\uri_for;
-use League\OAuth2\Client\Grant\ClientCredentials;
-use League\OAuth2\Client\Grant\Password;
-use League\OAuth2\Client\Provider\AbstractProvider;
-use League\OAuth2\Client\Token\AccessToken;
-use League\OAuth2\Client\Token\AccessTokenInterface;
+use GuzzleHttp\Subscriber\Cache\CacheSubscriber;
+use GuzzleHttp\Url;
+use Platformsh\Client\OAuth2\ApiToken;
+use Platformsh\Client\OAuth2\PasswordCredentialsWithTfa;
 use Platformsh\Client\Session\Session;
 use Platformsh\Client\Session\SessionInterface;
-use Platformsh\OAuth2\Client\Provider\Platformsh;
-use Platformsh\OAuth2\Client\Grant\ApiToken;
-use Platformsh\OAuth2\Client\GuzzleMiddleware;
 use Platformsh\Client\Session\Storage\File;
 
 class Connector implements ConnectorInterface
@@ -35,9 +30,6 @@ class Connector implements ConnectorInterface
 
     /** @var SessionInterface */
     protected $session;
-
-    /** @var bool */
-    protected $loggedOut = false;
 
     /**
      * @var array $storageKeys
@@ -86,10 +78,14 @@ class Connector implements ConnectorInterface
           'token_url' => '/oauth2/token',
           'proxy' => null,
           'api_token' => null,
-          'api_token_type' => 'exchange',
+          'api_token_type' => 'access',
           'gzip' => extension_loaded('zlib'),
         ];
         $this->config = $config + $defaults;
+
+        if (!isset($this->config['user_agent'])) {
+            $this->config['user_agent'] = $this->defaultUserAgent();
+        }
 
         if (!isset($this->config['user_agent'])) {
             $this->config['user_agent'] = $this->defaultUserAgent();
@@ -116,6 +112,23 @@ class Connector implements ConnectorInterface
      */
     private function defaultUserAgent()
     {
+        $version = trim(file_get_contents(__DIR__ . '/../../version.txt')) ?: '0.x.x';
+
+        return sprintf(
+            '%s/%s (%s; %s; PHP %s)',
+            'Platform.sh-Client-PHP',
+            $version,
+            php_uname('s'),
+            php_uname('r'),
+            PHP_VERSION
+        );
+    }
+
+    /**
+     * @return string
+     */
+    private function defaultUserAgent()
+    {
         $version = trim(file_get_contents(__DIR__ . '/../../version.txt')) ?: '2.0.x';
 
         return sprintf(
@@ -135,6 +148,8 @@ class Connector implements ConnectorInterface
      */
     public function logOut()
     {
+        $this->oauth2Plugin = null;
+
         try {
             $this->revokeTokens();
         } catch (BadResponseException $e) {
@@ -150,10 +165,6 @@ class Connector implements ConnectorInterface
 
     /**
      * Revokes the access and refresh tokens saved in the session.
-     *
-     * @see Connector::logOut()
-     *
-     * @throws \GuzzleHttp\Exception\GuzzleException
      */
     private function revokeTokens()
     {
@@ -161,16 +172,34 @@ class Connector implements ConnectorInterface
             'refresh_token' => $this->session->get('refreshToken'),
             'access_token' => $this->session->get('accessToken'),
         ]);
-        $url = uri_for($this->config['accounts'])
-            ->withPath($this->config['revoke_url'])
+        $url = Url::fromString($this->config['accounts'])
+            ->combine($this->config['revoke_url'])
             ->__toString();
         foreach ($revocations as $type => $token) {
-            $this->getClient()->request('post', $url, [
-                'form_params' => [
+            $this->getClient()->post($url, [
+                'body' => [
                     'token' => $token,
                     'token_type_hint' => $type,
                 ],
             ]);
+        }
+    }
+
+    /**
+     * Revokes the access and refresh tokens saved in the session.
+     *
+     * @see Connector::logOut()
+     *
+     * @throws \GuzzleHttp\Exception\GuzzleException
+     */
+    private function revokeTokens()
+    {
+        if ($this->oauth2Plugin) {
+            // Save the access token for future requests.
+            $token = $this->getOauth2Plugin()->getAccessToken(false);
+            if ($token !== null) {
+                $this->saveToken($token);
+            }
         }
     }
 
@@ -201,10 +230,19 @@ class Connector implements ConnectorInterface
         if (!$force && $this->isLoggedIn() && $this->session->get('username') === $username) {
             return;
         }
-        if ($this->isLoggedIn()) {
-            $this->logOut();
-        }
-        $token = $this->getProvider()->getAccessToken(new Password(), [
+        $this->logOut();
+        $client = $this->getGuzzleClient([
+          'base_url' => $this->config['accounts'],
+          'defaults' => [
+            'debug' => $this->config['debug'],
+            'verify' => $this->config['verify'],
+            'proxy' => $this->config['proxy'],
+          ],
+        ]);
+        $grantType = new PasswordCredentialsWithTfa(
+          $client, [
+            'client_id' => $this->config['client_id'],
+            'client_secret' => $this->config['client_secret'],
             'username' => $username,
             'password' => $password,
             'totp' => $totp,
@@ -315,6 +353,10 @@ class Connector implements ConnectorInterface
             if ($accessToken = $this->loadToken()) {
                 $this->oauthMiddleware->setAccessToken($accessToken);
             }
+
+            $this->oauth2Plugin->setTokenSaveCallback(function (AccessToken $token) {
+                $this->saveToken($token);
+            });
         }
 
         return $this->oauthMiddleware;
@@ -352,6 +394,13 @@ class Connector implements ConnectorInterface
                 'proxy' => $this->config['proxy'],
                 'auth' => 'oauth2',
             ];
+
+            if ($this->config['gzip']) {
+                $options['defaults']['decode_content'] = true;
+                $options['defaults']['headers']['Accept-Encoding'] = 'gzip';
+            }
+
+            $client = $this->getGuzzleClient($options);
 
             if ($this->config['gzip']) {
                 $config['decode_content'] = true;

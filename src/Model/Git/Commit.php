@@ -2,7 +2,7 @@
 
 namespace Platformsh\Client\Model\Git;
 
-use Platformsh\Client\Model\ApiResourceBase;
+use Platformsh\Client\Model\Resource;
 
 /**
  * Git commit resource.
@@ -15,7 +15,7 @@ use Platformsh\Client\Model\ApiResourceBase;
  * @property-read array  $committer
  * @property-read array  $parents
  */
-class Commit extends ApiResourceBase
+class Commit extends Resource
 {
     /**
      * Get the root Tree for this commit.

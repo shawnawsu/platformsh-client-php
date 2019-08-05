@@ -173,13 +173,13 @@ class Subscription extends ApiResourceBase
     /**
      * @inheritdoc
      */
-    public function operationAvailable($op, $refreshDuringCheck = false)
+    protected function isOperationAvailable($op)
     {
         if ($op === 'edit') {
             return true;
         }
 
-        return parent::operationAvailable($op, $refreshDuringCheck);
+        return parent::isOperationAvailable($op);
     }
 
     /**

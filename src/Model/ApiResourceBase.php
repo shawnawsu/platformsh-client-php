@@ -366,8 +366,9 @@ abstract class ApiResourceBase implements \ArrayAccess
         if (!empty($body)) {
             $options['json'] = $body;
         }
-        $request= new Request($method, $this->getLink("#$op"));
-        $data = $this->send($request, $this->client, $options);
+        $request = $this->client
+          ->createRequest($method, $this->getLink("#$op"), $options);
+        $data = $this->send($request, $this->client);
 
         return new Result($data, $this->baseUrl, $this->client, get_called_class());
     }
@@ -560,7 +561,11 @@ abstract class ApiResourceBase implements \ArrayAccess
      *
      * @return bool
      */
+<<<<<<< HEAD:src/Model/ApiResourceBase.php
     private function isOperationAvailable($op)
+=======
+    protected function isOperationAvailable($op)
+>>>>>>> 1.x:src/Model/Resource.php
     {
         return isset($this->data['_links']["#$op"]['href']);
     }

@@ -2,7 +2,7 @@
 
 namespace Platformsh\Client\Model;
 
-use function GuzzleHttp\Psr7\uri_for;
+use GuzzleHttp\Url;
 
 /**
  * A Platform.sh project.
@@ -409,7 +409,7 @@ class Project extends ApiResourceBase
     public static function getProjectBaseFromUrl($url)
     {
         if (preg_match('#/api/projects/([^/]+)#', $url, $matches)) {
-            return uri_for($url)->withPath('/api/projects/' . $matches[1])->__toString();
+            return Url::fromString($url)->combine('/api/projects/' . $matches[1])->__toString();
         }
 
         throw new \RuntimeException('Failed to find project ID from URL: ' . $url);

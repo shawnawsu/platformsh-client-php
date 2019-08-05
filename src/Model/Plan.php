@@ -11,7 +11,7 @@ use GuzzleHttp\ClientInterface;
  * @property-read string $label A label, e.g. "2X-Large".
  * @property-read Price  $price The plan price
  */
-class Plan extends ApiResourceBase
+class Plan extends Resource
 {
     /**
      * {@inheritdoc}

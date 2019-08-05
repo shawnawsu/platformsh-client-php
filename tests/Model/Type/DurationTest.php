@@ -2,10 +2,9 @@
 
 namespace Platformsh\Client\Tests\Model\Type;
 
-use PHPUnit\Framework\TestCase;
 use Platformsh\Client\Model\Type\Duration;
 
-class DurationTest extends TestCase
+class DurationTest extends \PHPUnit_Framework_TestCase
 {
 
     public function testStringToSeconds()
@@ -50,6 +49,24 @@ class DurationTest extends TestCase
         $actual = [];
         foreach (array_keys($expected) as $seconds) {
             $actual[$seconds] = (new Duration($seconds))->__toString();
+        }
+        $this->assertEquals($expected, $actual);
+    }
+
+    public function testCompare()
+    {
+        $expected = [
+            ['1s', '1m', -1],
+            ['1h', '1m', 1],
+            ['1h', '60m', 0],
+            ['1d', '86400s', 0],
+        ];
+        $actual = [];
+        foreach ($expected as $key => $expectation) {
+            list($a, $b) = $expectation;
+            $actual[$key] = [
+                $a, $b, (new Duration($a))->compare(new Duration($b))
+            ];
         }
         $this->assertEquals($expected, $actual);
     }

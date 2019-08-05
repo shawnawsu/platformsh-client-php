@@ -101,8 +101,9 @@ class Integration extends ApiResourceBase
     {
         $response = $exception->getResponse();
         if ($response && $response->getStatusCode() === 400) {
-            $data = json_decode($response->getBody()->__toString(), true);
-            if ($data !== null && isset($data['detail']) && is_array($data['detail'])) {
+            $response->getBody()->seek(0);
+            $data = $response->json();
+            if (isset($data['detail']) && is_array($data['detail'])) {
                 return $data['detail'];
             }
         }

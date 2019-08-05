@@ -14,7 +14,7 @@ use GuzzleHttp\ClientInterface;
  * @property-read string $zone
  * @property-read string $endpoint
  */
-class Region extends ApiResourceBase
+class Region extends Resource
 {
     /**
      * @inheritdoc
@@ -40,13 +40,13 @@ class Region extends ApiResourceBase
     /**
      * @inheritdoc
      */
-    public function operationAvailable($op, $refreshDuringCheck = false)
+    protected function isOperationAvailable($op)
     {
         if ($op === 'edit') {
             return true;
         }
 
-        return parent::operationAvailable($op, $refreshDuringCheck);
+        return parent::isOperationAvailable($op);
     }
 
     /**
