@@ -1,20 +1,15 @@
 <?php
-/** @noinspection PhpDocMissingThrowsInspection */
-/** @noinspection PhpUnhandledExceptionInspection */
-declare(strict_types=1);
 
 namespace Platformsh\Client;
 
 use GuzzleHttp\Exception\BadResponseException;
-use GuzzleHttp\Exception\GuzzleException;
 use Platformsh\Client\Connection\Connector;
 use Platformsh\Client\Connection\ConnectorInterface;
 use Platformsh\Client\Exception\ApiResponseException;
-use Platformsh\Client\Model\Billing\PlanRecord;
-use Platformsh\Client\Model\Billing\PlanRecordQuery;
 use Platformsh\Client\Model\Plan;
 use Platformsh\Client\Model\Project;
 use Platformsh\Client\Model\Region;
+use Platformsh\Client\Model\Catalog;
 use Platformsh\Client\Model\Result;
 use Platformsh\Client\Model\SshKey;
 use Platformsh\Client\Model\Subscription;
@@ -109,37 +104,17 @@ class PlatformClient
     public function getAccountInfo($reset = false)
     {
         if (!isset($this->accountInfo) || $reset) {
+            $client = $this->connector->getClient();
             $url = $this->accountsEndpoint . 'me';
             try {
-                $this->accountInfo = $this->simpleGet($url);
+                $this->accountInfo = (array) $client->get($url)->json();
             }
-            catch (GuzzleException $e) {
-                throw ApiResponseException::wrapGuzzleException($e);
+            catch (BadResponseException $e) {
+                throw ApiResponseException::create($e->getRequest(), $e->getResponse(), $e->getPrevious());
             }
         }
 
         return $this->accountInfo;
-    }
-
-    /**
-     * Get a URL and return the JSON-decoded response.
-     *
-     * @param string $url
-     * @param array  $options
-     *
-     * @return array
-     * @throws \GuzzleHttp\Exception\GuzzleException
-     */
-    private function simpleGet($url, array $options = [])
-    {
-        return (array) \GuzzleHttp\json_decode(
-          $this->getConnector()
-               ->getClient()
-               ->request('get', $url, $options)
-               ->getBody()
-               ->getContents(),
-          true
-        );
     }
 
     /**
@@ -173,17 +148,19 @@ class PlatformClient
      */
     protected function locateProject($id)
     {
+        $client = $this->connector->getClient();
         $url = $this->accountsEndpoint . 'projects/' . rawurlencode($id);
         try {
-            $result = $this->simpleGet($url);
+            $result = (array) $client->get($url)->json();
         }
         catch (BadResponseException $e) {
             $response = $e->getResponse();
-            $ignoredErrorCodes = [403, 404];
+            // @todo Remove 400 from this array when the API is more liberal in validating project IDs.
+            $ignoredErrorCodes = [400, 403, 404];
             if ($response && in_array($response->getStatusCode(), $ignoredErrorCodes)) {
                 return false;
             }
-            throw ApiResponseException::wrapGuzzleException($e);
+            throw ApiResponseException::create($e->getRequest(), $e->getResponse(), $e->getPrevious());
         }
 
         return isset($result['endpoint']) ? $result['endpoint'] : false;
@@ -250,6 +227,7 @@ class PlatformClient
     /**
      * Create a new Platform.sh subscription.
      *
+     * @param string $catalog            The catalog item url. See getCatalog().
      * @param string $region             The region ID. See getRegions().
      * @param string $plan               The plan. See Subscription::$availablePlans.
      * @param string $title              The project title.
@@ -257,6 +235,7 @@ class PlatformClient
      * @param int    $environments       The number of available environments.
      * @param array  $activationCallback An activation callback for the subscription.
      *
+     * @see PlatformClient::getCatalog()
      * @see PlatformClient::getRegions()
      * @see Subscription::wait()
      *
@@ -265,8 +244,9 @@ class PlatformClient
      *   similar code to wait for the subscription's project to be provisioned
      *   and activated.
      */
-    public function createSubscription($region, $plan = 'development', $title = null, $storage = null, $environments = null, array $activationCallback = null)
+    public function createSubscription($catalog, $region, $plan = 'development', $title = null, $storage = null, $environments = null, array $activationCallback = null)
     {
+
         $url = $this->accountsEndpoint . 'subscriptions';
         $values = $this->cleanRequest([
           'project_region' => $region,
@@ -274,9 +254,10 @@ class PlatformClient
           'project_title' => $title,
           'storage' => $storage,
           'environments' => $environments,
+          'options_url' => $catalog,
           'activation_callback' => $activationCallback,
         ]);
-
+        
         return Subscription::create($values, $url, $this->connector->getClient());
     }
 
@@ -308,8 +289,7 @@ class PlatformClient
      * Estimate the cost of a subscription.
      *
      * @param string      $plan         The plan machine name.
-     * @param int         $storage      The allowed storage per environment
-     *                                  (GiB).
+     * @param int         $storage      The allowed storage per environment (GiB).
      * @param int         $environments The number of environments.
      * @param int         $users        The number of users.
      * @param string|null $countryCode  A two-letter country code.
@@ -328,8 +308,15 @@ class PlatformClient
         if ($countryCode !== null) {
             $options['query']['country_code'] = $countryCode;
         }
+        try {
+            $response = $this->connector
+                ->getClient()
+                ->get($this->accountsEndpoint . 'subscriptions/estimate', $options);
+        } catch (BadResponseException $e) {
+            throw ApiResponseException::create($e->getRequest(), $e->getResponse(), $e->getPrevious());
+        }
 
-        return $this->simpleGet($this->accountsEndpoint . 'subscriptions/estimate', $options);
+        return $response->json();
     }
 
     /**
@@ -351,23 +338,14 @@ class PlatformClient
     {
         return Region::getCollection($this->accountsEndpoint . 'regions', 0, [], $this->getConnector()->getClient());
     }
-
+    
     /**
-     * Get plan records.
+     * Get the project options catalog.
      *
-     * @param PlanRecordQuery|null $query A query to restrict the returned plans.
-     *
-     * @return PlanRecord[]
+     * @return Catalog[]
      */
-    public function getPlanRecords(PlanRecordQuery $query = null)
+    public function getCatalog()
     {
-        $url = $this->accountsEndpoint . 'records/plan';
-        $options = [];
-
-        if ($query) {
-            $options['query'] = $query->getParams();
-        }
-
-        return PlanRecord::getCollection($url, 0, $options, $this->connector->getClient());
+        return Catalog::create([], $this->accountsEndpoint . 'setup/catalog', $this->getConnector()->getClient());
     }
 }
