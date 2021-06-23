@@ -2,7 +2,15 @@
 
 namespace Platformsh\Client\Model;
 
+use GuzzleHttp\ClientInterface;
+use GuzzleHttp\Psr7\Request;
 use function GuzzleHttp\Psr7\uri_for;
+use GuzzleHttp\Exception\BadResponseException;
+use Platformsh\Client\Model\Activities\HasActivitiesInterface;
+use Platformsh\Client\Model\Activities\HasActivitiesTrait;
+use Platformsh\Client\Model\Invitation\AlreadyInvitedException;
+use Platformsh\Client\Model\Invitation\ProjectInvitation;
+use \Platformsh\Client\Model\Invitation\Environment as InvitationEnvironment;
 
 /**
  * A Platform.sh project.
@@ -12,9 +20,26 @@ use function GuzzleHttp\Psr7\uri_for;
  * @property-read string $created_at
  * @property-read string $updated_at
  * @property-read string $owner
+ * @property-read string $default_branch
  */
-class Project extends ApiResourceBase
+class Project extends ApiResourceBase implements HasActivitiesInterface
 {
+    use HasActivitiesTrait;
+
+    private $urlViaGateway;
+
+    /**
+     * {@inheritDoc}
+     *
+     * Project information can come from a number of different places, which
+     * do not always contain full information about each project. So this
+     * overrides the Resource constructor to default $full to false.
+     */
+    public function __construct(array $data, $baseUrl = null, ClientInterface $client = null, $full = false)
+    {
+        parent::__construct($data, $baseUrl, $client, $full);
+    }
+
     /**
      * Prevent deletion.
      *
@@ -52,13 +77,6 @@ class Project extends ApiResourceBase
      */
     public function getGitUrl()
     {
-        // The collection doesn't provide a Git URL, but it does provide the
-        // right host, so the URL can be calculated.
-        if (!$this->hasProperty('repository', false)) {
-            $host = parse_url($this->getUri(), PHP_URL_HOST);
-
-            return "{$this->id}@git.{$host}:{$this->id}.git";
-        }
         $repository = $this->getProperty('repository');
 
         return $repository['url'];
@@ -82,8 +100,9 @@ class Project extends ApiResourceBase
      * @param bool   $byUuid Set true if $user is a UUID, or false (default) if
      *                       $user is an email address.
      *
-     * Note that for legacy reasons, the default for $byUuid is false for
-     * Project::addUser(), but true for Environment::addUser().
+     * @deprecated Users should now be invited via Project::inviteUserByEmail()
+     *
+     * @see Project::inviteUserByEmail()
      *
      * @return Result
      */
@@ -96,9 +115,76 @@ class Project extends ApiResourceBase
     }
 
     /**
+     * Set the API gateway URL, e.g. 'https://api.platform.sh'.
+     *
+     * @param string $url
+     */
+    public function setApiUrl($url)
+    {
+        $projectUrl = uri_for($url)->withPath('/projects/' . \urlencode($this->id))->__toString();
+        $this->urlViaGateway = $projectUrl;
+    }
+
+    /**
+     * Invite a new user to a project using their email address.
+     *
+     * This is only possible after setting the API gateway URL. This will be
+     * the case already if the project was instantiated via a PlatformClient
+     * method such as PlatformClient::getProject(). Otherwise, use
+     * Project::setApiUrl() before calling this method.
+     *
+     * @see Project::setApiUrl()
+     * @see \Platformsh\Client\PlatformClient::getProject()
+     *
+     * Normally either a list of $environments should be given, or the project-level $role should be 'admin'.
+     *
+     * @param string $email
+     *   The user's email address.
+     * @param string $role
+     *   The user's role on the project ('viewer' or 'admin').
+     * @param InvitationEnvironment[] $environments
+     *   A list of environments for the invitation. Only used if the project role is not 'admin'.
+     *
+     * @throws AlreadyInvitedException if there is a pending invitation open with the same details
+     *
+     * @return ProjectInvitation
+     */
+    public function inviteUserByEmail($email, $role, array $environments = [])
+    {
+        $data = [
+            'email' => $email,
+            'role' => $role,
+            'environments' => InvitationEnvironment::listForApi($environments),
+        ];
+
+        $request = new Request('post', $this->getLink('invitations'), ['Content-Type' => 'application/json'], \GuzzleHttp\json_encode($data));
+        try {
+            $data = self::send($request, $this->client);
+        } catch (BadResponseException $e) {
+            if ($e->getResponse() && $e->getResponse()->getStatusCode() === 409) {
+                throw new AlreadyInvitedException(
+                    'An invitation has already been created for this email address and role(s)',
+                    $email,
+                    $this,
+                    $role,
+                    $environments
+                );
+            }
+            throw $e;
+        }
+
+        return new ProjectInvitation($data, $this->getLink('invitations'), $this->client);
+    }
+
+    /**
      * Get a single environment of the project.
      *
-     * @param string $id
+     * To get the project's default environment, use:
+     * <code>
+     * $defaultEnv = $project->getEnvironment($project->default_branch);
+     * </code>
+     *
+     * @param string $id The environment ID.
      *
      * @return Environment|false
      */
@@ -129,6 +215,13 @@ class Project extends ApiResourceBase
 
         if ($rel === '#manage-variables') {
             return $this->getUri() . '/variables';
+        }
+
+        if ($rel === 'invitations') {
+            if (!isset($this->urlViaGateway)) {
+                throw new \RuntimeException('The API gateway URL must be set');
+            }
+            return rtrim($this->urlViaGateway, '/') . '/invitations';
         }
 
         return $this->getUri() . '/' . ltrim($rel, '#');
@@ -225,52 +318,6 @@ class Project extends ApiResourceBase
         $body = ['type' => $type] + $data;
 
         return Integration::create($body, $this->getLink('integrations'), $this->client);
-    }
-
-    /**
-     * Get a single project activity.
-     *
-     * @param string $id
-     *
-     * @return Activity|false
-     */
-    public function getActivity($id)
-    {
-        return Activity::get($id, $this->getUri() . '/activities', $this->client);
-    }
-
-    /**
-     * Get a list of project activities.
-     *
-     * @param int $limit
-     *   Limit the number of activities to return.
-     * @param string $type
-     *   Filter activities by type.
-     * @param int $startsAt
-     *   A UNIX timestamp for the maximum created date of activities to return.
-     *
-     * @return Activity[]
-     */
-    public function getActivities($limit = 0, $type = null, $startsAt = null)
-    {
-        $options = [];
-        if ($type !== null) {
-            $options['query']['type'] = $type;
-        }
-        if ($startsAt !== null) {
-            $options['query']['starts_at'] = Activity::formatStartsAt($startsAt);
-        }
-
-        $activities = Activity::getCollection($this->getUri() . '/activities', $limit, $options, $this->client);
-
-        // Guarantee the type filter (works around a temporary bug).
-        if ($type !== null) {
-            $activities = array_filter($activities, function (Activity $activity) use ($type) {
-                return $activity->type === $type;
-            });
-        }
-
-        return $activities;
     }
 
     /**

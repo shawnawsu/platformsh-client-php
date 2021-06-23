@@ -3,8 +3,11 @@
 namespace Platformsh\Client\Model;
 
 use Cocur\Slugify\Slugify;
+use GuzzleHttp\ClientInterface;
 use Platformsh\Client\Exception\EnvironmentStateException;
 use Platformsh\Client\Exception\OperationUnavailableException;
+use Platformsh\Client\Model\Activities\HasActivitiesInterface;
+use Platformsh\Client\Model\Activities\HasActivitiesTrait;
 use Platformsh\Client\Model\Backups\BackupConfig;
 use Platformsh\Client\Model\Backups\Policy;
 use Platformsh\Client\Model\Deployment\EnvironmentDeployment;
@@ -55,8 +58,10 @@ use Platformsh\Client\Model\Git\Commit;
  *   The backup configuration. It's recommended to use getBackupConfig() instead
  *   of using this array directly.
  */
-class Environment extends ApiResourceBase
+class Environment extends ApiResourceBase implements HasActivitiesInterface
 {
+    use HasActivitiesTrait;
+
     /**
      * Get the current deployment of this environment.
      *
@@ -103,6 +108,14 @@ class Environment extends ApiResourceBase
         $urls = $this->getSshUrls();
         if (isset($urls[$app])) {
             return $urls[$app];
+        }
+
+        // Look for the first URL whose key starts with "$app:".
+        \ksort($urls, SORT_NATURAL);
+        foreach ($urls as $key => $url) {
+            if (\strpos($key, $app . ':') === 0) {
+                return $url;
+            }
         }
 
         // Fall back to the legacy SSH URL.
@@ -218,23 +231,34 @@ class Environment extends ApiResourceBase
     }
 
     /**
-     * Branch (create a new environment).
+     * Branches an environment (creates a new environment as a child of the current one).
+     *
+     * The new environment's code will be the same as the parent environment.
+     * Some other settings are typically inherited, such as variables.
+     * Data is cloned from the parent environment (if $cloneParent is left as
+     * true), including all data from services and file mounts.
      *
      * @param string $title       The title of the new environment.
-     * @param string $id          The ID of the new environment. This will be the Git
-     *                            branch name. Leave blank to generate automatically
-     *                            from the title.
+     * @param string|null $id     The ID of the new environment. This will be the Git
+     *                            branch name. Leave empty to generate automatically
+     *                            from the title (not recommended).
      * @param bool   $cloneParent Whether to clone data from the parent
      *                            environment while branching.
+     * @param string|null $type   The environment type, e.g. 'staging' or 'development'.
+     *                            Leave this empty to use the default type for new
+     *                            environments ('development' at the time of writing).
      *
      * @return Activity
      */
-    public function branch($title, $id = null, $cloneParent = true)
+    public function branch($title, $id = null, $cloneParent = true, $type = null)
     {
         $id = $id ?: $this->sanitizeId($title);
         $body = ['name' => $id, 'title' => $title];
         if (!$cloneParent) {
             $body['clone_parent'] = false;
+        }
+        if ($type !== null) {
+            $body['type'] = $type;
         }
 
         return $this->runLongOperation('branch', 'post', $body);
@@ -370,57 +394,21 @@ class Environment extends ApiResourceBase
     /**
      * Create a backup of the environment.
      *
+     * @param bool $unsafeAllowInconsistent
+     *   Whether to allow performing an inconsistent backup (default: false).
+     *   If true, this leaves the environment running and open to connections
+     *   during the backup. So it reduces downtime, at the risk of backing up
+     *   data in an inconsistent state.
+     *
      * @return Activity
      */
-    public function backup()
+    public function backup($unsafeAllowInconsistent = false)
     {
-        return $this->runLongOperation('backup');
-    }
-
-    /**
-     * Get a single environment activity.
-     *
-     * @param string $id
-     *
-     * @return Activity|false
-     */
-    public function getActivity($id)
-    {
-        return Activity::get($id, $this->getUri() . '/activities', $this->client);
-    }
-
-    /**
-     * Get a list of environment activities.
-     *
-     * @param int    $limit
-     *   Limit the number of activities to return.
-     * @param string $type
-     *   Filter activities by type.
-     * @param int    $startsAt
-     *   A UNIX timestamp for the maximum created date of activities to return.
-     *
-     * @return Activity[]
-     */
-    public function getActivities($limit = 0, $type = null, $startsAt = null)
-    {
-        $options = [];
-        if ($type !== null) {
-            $options['query']['type'] = $type;
+        $params = [];
+        if ($unsafeAllowInconsistent) {
+            $params['safe'] = false;
         }
-        if ($startsAt !== null) {
-            $options['query']['starts_at'] = Activity::formatStartsAt($startsAt);
-        }
-
-        $activities = Activity::getCollection($this->getUri() . '/activities', $limit, $options, $this->client);
-
-        // Guarantee the type filter (works around a temporary bug).
-        if ($type !== null) {
-            $activities = array_filter($activities, function (Activity $activity) use ($type) {
-                return $activity->type === $type;
-            });
-        }
-
-        return $activities;
+        return $this->runLongOperation('backup', 'post', $params);
     }
 
     /**
@@ -566,8 +554,9 @@ class Environment extends ApiResourceBase
      * @param bool   $byUuid Set true (default) if $user is a UUID, or false if
      *                       $user is an email address.
      *
-     * Note that for legacy reasons, the default for $byUuid is false for
-     * Project::addUser(), but true for Environment::addUser().
+     * @deprecated Users should now be invited via Project::inviteUserByEmail()
+     *
+     * @see Project::inviteUserByEmail()
      *
      * @return Result
      */

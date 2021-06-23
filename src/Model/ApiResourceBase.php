@@ -47,7 +47,7 @@ abstract class ApiResourceBase implements \ArrayAccess
      * @param bool            $full    Whether the data is a complete
      *                                 representation of the resource.
      */
-    public function __construct(array $data, $baseUrl = null, ClientInterface $client = null, $full = false)
+    public function __construct(array $data, $baseUrl = null, ClientInterface $client = null, $full = true)
     {
         $this->setData($data);
         $this->client = $client ?: new Client();
@@ -200,7 +200,7 @@ abstract class ApiResourceBase implements \ArrayAccess
             throw new \InvalidArgumentException($message);
         }
 
-        $request = new Request('post', $collectionUrl, [], \GuzzleHttp\json_encode($body));
+        $request = new Request('post', $collectionUrl, ['Content-Type' => 'application/json'], \GuzzleHttp\json_encode($body));
         $data = self::send($request, $client);
 
         return new Result($data, $collectionUrl, $client, get_called_class());

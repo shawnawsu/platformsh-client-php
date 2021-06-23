@@ -3,6 +3,8 @@
 namespace Platformsh\Client\Model;
 
 use GuzzleHttp\Exception\BadResponseException;
+use Platformsh\Client\Model\Activities\HasActivitiesInterface;
+use Platformsh\Client\Model\Activities\HasActivitiesTrait;
 
 /**
  * A project integration.
@@ -10,8 +12,9 @@ use GuzzleHttp\Exception\BadResponseException;
  * @property-read string $id
  * @property-read string $type
  */
-class Integration extends ApiResourceBase
+class Integration extends ApiResourceBase implements HasActivitiesInterface
 {
+    use HasActivitiesTrait;
 
     /** @var array */
     protected static $required = ['type'];
@@ -19,6 +22,7 @@ class Integration extends ApiResourceBase
     /** @var array */
     protected static $types = [
       'bitbucket',
+      'bitbucket_server',
       'hipchat',
       'github',
       'gitlab',
@@ -26,6 +30,7 @@ class Integration extends ApiResourceBase
       'health.email',
       'health.pagerduty',
       'health.slack',
+      'health.webhook',
     ];
 
     /**

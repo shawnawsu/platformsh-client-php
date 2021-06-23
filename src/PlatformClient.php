@@ -15,18 +15,20 @@ use Platformsh\Client\Model\Billing\PlanRecordQuery;
 use Platformsh\Client\Model\Plan;
 use Platformsh\Client\Model\Project;
 use Platformsh\Client\Model\Region;
+use Platformsh\Client\Model\Catalog;
 use Platformsh\Client\Model\Result;
+use Platformsh\Client\Model\SetupOptions;
 use Platformsh\Client\Model\SshKey;
 use Platformsh\Client\Model\Subscription;
+use function GuzzleHttp\Psr7\uri_for;
+use Platformsh\Client\Model\Subscription\SubscriptionOptions;
+use Platformsh\Client\Model\User;
 
 class PlatformClient
 {
 
     /** @var ConnectorInterface */
     protected $connector;
-
-    /** @var string */
-    protected $accountsEndpoint;
 
     /** @var array */
     protected $accountInfo;
@@ -37,7 +39,6 @@ class PlatformClient
     public function __construct(ConnectorInterface $connector = null)
     {
         $this->connector = $connector ?: new Connector();
-        $this->accountsEndpoint = $this->connector->getAccountsEndpoint();
     }
 
     /**
@@ -46,6 +47,14 @@ class PlatformClient
     public function getConnector()
     {
         return $this->connector;
+    }
+
+    /**
+     * Returns the base URL of the API, without trailing slash.
+     */
+    private function apiUrl()
+    {
+        return $this->connector->getApiUrl() ?: rtrim($this->connector->getAccountsEndpoint(), '/');
     }
 
     /**
@@ -71,9 +80,23 @@ class PlatformClient
             return $this->getProjectDirect($id, $hostname, $https);
         }
 
+        // Use the API gateway.
+        $apiUrl = $this->connector->getApiUrl();
+        if ($apiUrl) {
+            $project = Project::get($id, $apiUrl . '/projects', $this->connector->getClient());
+            if ($project) {
+                $project->setApiUrl($apiUrl);
+            }
+            return $project;
+        }
+
         // Use the project locator.
         if ($url = $this->locateProject($id)) {
-            return Project::get($url, null, $this->connector->getClient());
+            $project = Project::get($url, null, $this->connector->getClient());
+            if ($project && ($apiUrl = $this->connector->getApiUrl())) {
+                $project->setApiUrl($apiUrl);
+            }
+            return $project;
         }
 
         return false;
@@ -90,10 +113,15 @@ class PlatformClient
     {
         $data = $this->getAccountInfo($reset);
         $client = $this->connector->getClient();
+        $apiUrl = $this->connector->getApiUrl();
         $projects = [];
-        foreach ($data['projects'] as $project) {
+        foreach ($data['projects'] as $data) {
             // Each project has its own endpoint on a Platform.sh region.
-            $projects[] = new Project($project, $project['endpoint'], $client);
+            $project = new Project($data, $data['endpoint'], $client);
+            if ($apiUrl) {
+                $project->setApiUrl($apiUrl);
+            }
+            $projects[] = $project;
         }
 
         return $projects;
@@ -102,6 +130,14 @@ class PlatformClient
     /**
      * Get account information for the logged-in user.
      *
+     * This information includes various integrated details such as the
+     * projects the user can access, their registered SSH keys, and legacy
+     * information.
+     *
+     * For purely user profile related information, getUser() is recommended.
+     *
+     * @see PlatformClient::getUser()
+     *
      * @param bool $reset
      *
      * @return array
@@ -109,7 +145,7 @@ class PlatformClient
     public function getAccountInfo($reset = false)
     {
         if (!isset($this->accountInfo) || $reset) {
-            $url = $this->accountsEndpoint . 'me';
+            $url = $this->apiUrl() . '/me';
             try {
                 $this->accountInfo = $this->simpleGet($url);
             }
@@ -159,7 +195,11 @@ class PlatformClient
     {
         $scheme = $https ? 'https' : 'http';
         $collection = "$scheme://$hostname/api/projects";
-        return Project::get($id, $collection, $this->connector->getClient());
+        $project = Project::get($id, $collection, $this->connector->getClient());
+        if ($project && ($apiUrl = $this->connector->getApiUrl())) {
+            $project->setApiUrl($apiUrl);
+        }
+        return $project;
     }
 
     /**
@@ -173,7 +213,7 @@ class PlatformClient
      */
     protected function locateProject($id)
     {
-        $url = $this->accountsEndpoint . 'projects/' . rawurlencode($id);
+        $url = rtrim($this->connector->getAccountsEndpoint(), '/') . '/projects/' . rawurlencode($id);
         try {
             $result = $this->simpleGet($url);
         }
@@ -186,7 +226,13 @@ class PlatformClient
             throw ApiResponseException::wrapGuzzleException($e);
         }
 
-        return isset($result['endpoint']) ? $result['endpoint'] : false;
+        if (isset($result['endpoint'])) {
+            return $result['endpoint'];
+        }
+        if (isset($result['_links']['self']['href'])) {
+            return $result['_links']['self']['href'];
+        }
+        return false;
     }
 
     /**
@@ -200,7 +246,7 @@ class PlatformClient
     {
         $data = $this->getAccountInfo($reset);
 
-        return SshKey::wrapCollection($data['ssh_keys'], $this->accountsEndpoint, $this->connector->getClient());
+        return SshKey::wrapCollection($data['ssh_keys'], $this->apiUrl() . '/ssh_keys', $this->connector->getClient());
     }
 
     /**
@@ -212,7 +258,7 @@ class PlatformClient
      */
     public function getSshKey($id)
     {
-        $url = $this->accountsEndpoint . 'ssh_keys';
+        $url = $this->apiUrl() . '/ssh_keys';
 
         return SshKey::get($id, $url, $this->connector->getClient());
     }
@@ -228,7 +274,7 @@ class PlatformClient
     public function addSshKey($value, $title = null)
     {
         $values = $this->cleanRequest(['value' => $value, 'title' => $title]);
-        $url = $this->accountsEndpoint . 'ssh_keys';
+        $url = $this->apiUrl() . '/ssh_keys';
 
         return SshKey::create($values, $url, $this->connector->getClient());
     }
@@ -250,32 +296,50 @@ class PlatformClient
     /**
      * Create a new Platform.sh subscription.
      *
-     * @param string $region             The region ID. See getRegions().
-     * @param string $plan               The plan. See Subscription::$availablePlans.
-     * @param string $title              The project title.
-     * @param int    $storage            The storage of each environment, in MiB.
-     * @param int    $environments       The number of available environments.
-     * @param array  $activationCallback An activation callback for the subscription.
-     *
-     * @see PlatformClient::getRegions()
-     * @see Subscription::wait()
+     * @param SubscriptionOptions|string $options
+     *   Subscription request options, which override the other arguments.
+     *   If a string is passed, it will be used as the region ID (deprecated). See getRegions().
+     * @param string $plan                The plan. See getPlans(). @deprecated
+     * @param string $title               The project title. @deprecated
+     * @param int    $storage             The storage of each environment, in MiB. @deprecated
+     * @param int    $environments        The number of available environments. @deprecated
+     * @param array  $activation_callback An activation callback for the subscription. @deprecated
+     * @param string $options_url         The catalog options URL. See getCatalog(). @deprecated
      *
      * @return Subscription
      *   A subscription, representing a project. Use Subscription::wait() or
      *   similar code to wait for the subscription's project to be provisioned
      *   and activated.
+     *
+     * @see PlatformClient::getCatalog()
+     * @see PlatformClient::getRegions()
+     * @see Subscription::wait()
+     *
+     * @noinspection PhpTooManyParametersInspection
      */
-    public function createSubscription($region, $plan = 'development', $title = null, $storage = null, $environments = null, array $activationCallback = null)
+    public function createSubscription($options, $plan = null, $title = null, $storage = null, $environments = null, array $activation_callback = null, $options_url = null)
     {
-        $url = $this->accountsEndpoint . 'subscriptions';
-        $values = $this->cleanRequest([
-          'project_region' => $region,
-          'plan' => $plan,
-          'project_title' => $title,
-          'storage' => $storage,
-          'environments' => $environments,
-          'activation_callback' => $activationCallback,
-        ]);
+        $url = $this->apiUrl() . '/subscriptions';
+        if ($options instanceof SubscriptionOptions) {
+            $values = $options->toArray();
+        } elseif (\is_string($options)) {
+            \trigger_error('The previous arguments list has been replaced by a single SubscriptionOptions argument', E_USER_DEPRECATED);
+            if ($plan === null) {
+                // Backwards-compatible default.
+                $plan = 'development';
+            }
+            $values = $this->cleanRequest([
+                'project_region' => $options,
+                'plan' => $plan,
+                'project_title' => $title,
+                'storage' => $storage,
+                'environments' => $environments,
+                'activation_callback' => $activation_callback,
+                'options_url' => $options_url,
+            ]);
+        } else {
+            throw new \InvalidArgumentException('The first argument must be a SubscriptionOptions object or a string');
+        }
 
         return Subscription::create($values, $url, $this->connector->getClient());
     }
@@ -287,7 +351,7 @@ class PlatformClient
      */
     public function getSubscriptions()
     {
-        $url = $this->accountsEndpoint . 'subscriptions';
+        $url = $this->apiUrl() . '/subscriptions';
         return Subscription::getCollection($url, 0, [], $this->connector->getClient());
     }
 
@@ -300,7 +364,7 @@ class PlatformClient
      */
     public function getSubscription($id)
     {
-        $url = $this->accountsEndpoint . 'subscriptions';
+        $url = $this->apiUrl() . '/subscriptions';
         return Subscription::get($id, $url, $this->connector->getClient());
     }
 
@@ -329,7 +393,7 @@ class PlatformClient
             $options['query']['country_code'] = $countryCode;
         }
 
-        return $this->simpleGet($this->accountsEndpoint . 'subscriptions/estimate', $options);
+        return $this->simpleGet($this->apiUrl() . '/subscriptions/estimate', $options);
     }
 
     /**
@@ -339,7 +403,7 @@ class PlatformClient
      */
     public function getPlans()
     {
-        return Plan::getCollection($this->accountsEndpoint . 'plans', 0, [], $this->getConnector()->getClient());
+        return Plan::getCollection($this->apiUrl() . '/plans', 0, [], $this->getConnector()->getClient());
     }
 
     /**
@@ -349,7 +413,7 @@ class PlatformClient
      */
     public function getRegions()
     {
-        return Region::getCollection($this->accountsEndpoint . 'regions', 0, [], $this->getConnector()->getClient());
+        return Region::getCollection($this->apiUrl() . '/regions', 0, [], $this->getConnector()->getClient());
     }
 
     /**
@@ -361,7 +425,7 @@ class PlatformClient
      */
     public function getPlanRecords(PlanRecordQuery $query = null)
     {
-        $url = $this->accountsEndpoint . 'records/plan';
+        $url = $this->apiUrl() . '/records/plan';
         $options = [];
 
         if ($query) {
@@ -369,5 +433,80 @@ class PlatformClient
         }
 
         return PlanRecord::getCollection($url, 0, $options, $this->connector->getClient());
+    }
+
+    /**
+     * Request an SSH certificate.
+     *
+     * @param string $publicKey
+     *   The contents of an SSH public key. Do not reuse a key that had other
+     *   purposes: generate a dedicated key pair for the current user.
+     *
+     * @return string
+     *   An SSH certificate, which should be saved alongside the SSH key pair,
+     *   e.g. as "id_rsa-cert.pub", alongside "id_rsa" and "id_rsa.pub".
+     */
+    public function getSshCertificate(string $publicKey): string
+    {
+        $response = $this->connector->getClient()->post(
+            uri_for($this->connector->getConfig()['certifier_url'])->withPath('/ssh'),
+            ['json' => ['key' => $publicKey]]
+        );
+
+        return \GuzzleHttp\json_decode($response->getBody(), true)['certificate'];
+    }
+
+    /**
+     * Get the project options catalog.
+     *
+     * @return \Platformsh\Client\Model\CatalogItem[]
+     */
+    public function getCatalog()
+    {
+        return Catalog::create([], $this->apiUrl() . '/setup/catalog', $this->getConnector()->getClient());
+    }
+
+    /**
+     * Get the setup options file for a user.
+     *
+     * @param string $vendor             The query string containing the vendor machine name.
+     * @param string $plan               The machine name of the plan which has been selected during the project setup process.
+     * @param string $options_url        The URL of a project options file which has been selected as a setup template.
+     * @param string $username           The name of the account for which the project is to be created.
+     * @param string $organization       The name of the organization for which the project is to be created.
+     *
+     * @return SetupOptions
+     */
+    public function getSetupOptions($vendor = NULL, $plan = NULL, $options_url = NULL, $username = NULL, $organization = NULL)
+    {
+        $url = $this->apiUrl() . '/setup/options';
+        $options = $this->cleanRequest([
+          'vendor' => $vendor,
+          'plan' => $plan,
+          'options_url' => $options_url,
+          'username' => $username,
+          'organization' => $organization
+        ]);
+
+        return SetupOptions::create($options, $url, $this->connector->getClient());
+    }
+
+    /**
+     * Get a user account.
+     *
+     * @param string|null $id
+     *   The user ID. Defaults to the current user.
+     *
+     * @return User|false
+     */
+    public function getUser($id = null)
+    {
+        if (!$this->connector->getApiUrl()) {
+            throw new \RuntimeException('No API URL configured');
+        }
+        if ($id === null) {
+            $id = 'me';
+        }
+        return User::get($id, $this->connector->getApiUrl() . '/users', $this->connector->getClient());
     }
 }

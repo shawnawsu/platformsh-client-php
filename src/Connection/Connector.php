@@ -4,7 +4,7 @@ namespace Platformsh\Client\Connection;
 
 use GuzzleHttp\Client;
 use GuzzleHttp\ClientInterface;
-use GuzzleHttp\Exception\BadResponseException;
+use GuzzleHttp\Exception\RequestException;
 use GuzzleHttp\HandlerStack;
 use function GuzzleHttp\Psr7\uri_for;
 use League\OAuth2\Client\Grant\ClientCredentials;
@@ -60,7 +60,7 @@ class Connector implements ConnectorInterface
     /**
      * @param array            $config
      *     Possible configuration keys are:
-     *     - accounts (string): The endpoint URL for the accounts API.
+     *     - api_url (string): The API base URL.
      *     - client_id (string): The OAuth2 client ID for this client.
      *     - debug (bool): Whether or not Guzzle debugging should be enabled
      *       (default: false).
@@ -74,16 +74,22 @@ class Connector implements ConnectorInterface
      */
     public function __construct(array $config = [], SessionInterface $session = null)
     {
+        if (isset($config['accounts'])) {
+            \trigger_error('The "accounts" URL option is deprecated. APIs are accessed based on the "api_url" and OAuth 2.0 URL options instead.', E_USER_DEPRECATED);
+        }
+
         $defaults = [
-          'accounts' => 'https://accounts.platform.sh/api/v1/',
+          'api_url' => 'https://api.platform.sh',
+          'accounts' => 'https://api.platform.sh/',
           'client_id' => 'platformsh-client-php',
           'client_secret' => '',
           'debug' => false,
           'verify' => true,
           'user_agent' => null,
           'cache' => false,
-          'revoke_url' => '/oauth2/revoke',
-          'token_url' => '/oauth2/token',
+          'revoke_url' => 'https://auth.api.platform.sh/oauth2/revoke',
+          'token_url' => 'https://auth.api.platform.sh/oauth2/token',
+          'certifier_url' => 'https://ssh.api.platform.sh',
           'proxy' => null,
           'api_token' => null,
           'api_token_type' => 'exchange',
@@ -112,6 +118,14 @@ class Connector implements ConnectorInterface
     }
 
     /**
+     * @return array
+     */
+    public function getConfig()
+    {
+        return $this->config;
+    }
+
+    /**
      * @return string
      */
     private function defaultUserAgent()
@@ -129,6 +143,26 @@ class Connector implements ConnectorInterface
     }
 
     /**
+     * Get the configured accounts endpoint URL.
+     *
+     * @deprecated Use Connector::getApiUrl() instead
+     */
+    public function getAccountsEndpoint()
+    {
+        return $this->config['accounts'];
+    }
+
+    /**
+     * Get the configured API gateway URL (without trailing slash).
+     *
+     * @return string
+     */
+    public function getApiUrl()
+    {
+        return rtrim($this->config['api_url'], '/');
+    }
+
+    /**
      * @inheritdoc
      *
      * @throws \GuzzleHttp\Exception\GuzzleException if tokens cannot be revoked.
@@ -137,15 +171,39 @@ class Connector implements ConnectorInterface
     {
         try {
             $this->revokeTokens();
-        } catch (BadResponseException $e) {
-            // Retry the request once.
-            if ($e->getResponse() && $e->getResponse()->getStatusCode() < 500) {
+        } catch (RequestException $e) {
+            // Retry the request once, if we received a retry status.
+            $retryStatuses = [408, 429, 502, 503, 504];
+            if ($e->getResponse() && in_array($e->getResponse()->getStatusCode(), $retryStatuses)) {
                 $this->revokeTokens();
+            } else {
+                trigger_error($e->getMessage());
             }
         } finally {
             $this->session->clear();
             $this->session->save();
         }
+    }
+
+    /**
+     * Get a configured OAuth 2.0 URL.
+     *
+     * @param string $key Either 'token_url' or 'revoke_url'
+     *
+     * @return string
+     */
+    private function getOAuthUrl($key)
+    {
+        $url = $this->config[$key];
+
+        // Backwards compatibility.
+        if (strpos($url, '//') === false) {
+            $url = uri_for($this->config['accounts'])
+                ->withPath($this->config[$key])
+                ->__toString();
+        }
+
+        return $url;
     }
 
     /**
@@ -161,16 +219,17 @@ class Connector implements ConnectorInterface
             'refresh_token' => $this->session->get('refreshToken'),
             'access_token' => $this->session->get('accessToken'),
         ]);
-        $url = uri_for($this->config['accounts'])
-            ->withPath($this->config['revoke_url'])
-            ->__toString();
+        $url = $this->getOAuthUrl('revoke_url');
         foreach ($revocations as $type => $token) {
-            $this->getClient()->request('post', $url, [
+            $options = [
                 'form_params' => [
+                    'client_id' => $this->config['client_id'],
+                    'client_secret' => $this->config['client_secret'],
                     'token' => $token,
                     'token_type_hint' => $type,
                 ],
-            ]);
+            ];
+            $this->getClient()->request('post', $url, $options);
         }
     }
 
@@ -180,14 +239,6 @@ class Connector implements ConnectorInterface
     public function getSession()
     {
         return $this->session;
-    }
-
-    /**
-     * {@inheritdoc}
-     */
-    public function getAccountsEndpoint()
-    {
-        return $this->config['accounts'];
     }
 
     /**
@@ -218,7 +269,8 @@ class Connector implements ConnectorInterface
         return $this->provider ? $this->provider : new Platformsh([
           'clientId' => $this->config['client_id'],
           'clientSecret' => $this->config['client_secret'],
-          'base_uri' => $this->config['accounts'],
+          'token_url' => $this->config['token_url'],
+          'api_url' => $this->config['api_url'],
           'debug' => $this->config['debug'],
           'verify' => $this->config['verify'],
           'proxy' => $this->config['proxy'],
